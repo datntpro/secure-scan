@@ -1,0 +1,22 @@
+# Cloudflare Pages Configuration for SecureScan.vn
+
+name = "securescan-vn"
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "securescan-vn"
+route = "securescan.vn/*"
+
+[env.staging]
+name = "securescan-vn-staging"
+route = "staging.securescan.vn/*"
+
+# Build configuration
+[build]
+command = "npm run build"
+cwd = "."
+watch_dir = "src"
+
+# Environment variables (will be set in Cloudflare dashboard)
+[vars]
+NEXT_PUBLIC_ENVIRONMENT = "production"

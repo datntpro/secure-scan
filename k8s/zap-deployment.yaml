@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zap-cluster
+  namespace: securescan
+  labels:
+    app: zap
+    component: scanner
+spec:
+  replicas: 5  # Start with 5 ZAP instances
+  selector:
+    matchLabels:
+      app: zap
+  template:
+    metadata:
+      labels:
+        app: zap
+    spec:
+      containers:
+      - name: zap
+        image: owasp/zap2docker-stable:latest
+        ports:
+        - containerPort: 8080
+          name: zap-api
+        command:
+        - "zap.sh"
+        - "-daemon"
+        - "-host"
+        - "0.0.0.0"
+        - "-port"
+        - "8080"
+        - "-config"
+        - "api.addrs.addr.name=.*"
+        - "-config"
+        - "api.addrs.addr.regex=true"
+        - "-config"
+        - "api.key=securescan-zap-key"
+        env:
+        - name: JAVA_OPTS
+          value: "-Xmx2g -XX:+UseG1GC"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /JSON/core/view/version/
+            port: 8080
+            httpHeaders:
+            - name: X-ZAP-API-Key
+              value: securescan-zap-key
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /JSON/core/view/version/
+            port: 8080
+            httpHeaders:
+            - name: X-ZAP-API-Key
+              value: securescan-zap-key
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        volumeMounts:
+        - name: zap-data
+          mountPath: /zap/wrk
+      volumes:
+      - name: zap-data
+        emptyDir: {}
+      
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zap-service
+  namespace: securescan
+  labels:
+    app: zap
+spec:
+  selector:
+    app: zap
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: zap-api
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: zap-hpa
+  namespace: securescan
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: zap-cluster
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60

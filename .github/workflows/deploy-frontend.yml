@@ -1,0 +1,119 @@
+name: Deploy Frontend to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+          
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+        
+      - name: Run type check
+        working-directory: frontend
+        run: npm run type-check
+        
+      - name: Run linting
+        working-directory: frontend
+        run: npm run lint
+        
+      - name: Run tests
+        working-directory: frontend
+        run: npm run test
+        
+      - name: Build application
+        working-directory: frontend
+        run: npm run build
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_API_URL: ${{ github.ref == 'refs/heads/main' && 'https://api.securescan.vn' || 'https://api-staging.securescan.vn' }}
+          NEXT_PUBLIC_WS_URL: ${{ github.ref == 'refs/heads/main' && 'wss://api.securescan.vn' || 'wss://api-staging.securescan.vn' }}
+          NEXT_PUBLIC_APP_URL: ${{ github.ref == 'refs/heads/main' && 'https://securescan.vn' || 'https://staging.securescan.vn' }}
+          NEXT_PUBLIC_ENVIRONMENT: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+          
+      - name: Deploy to Cloudflare Pages (Staging)
+        if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: securescan-vn
+          directory: frontend/out
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Deploy to Cloudflare Pages (Production)
+        if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: securescan-vn
+          directory: frontend/out
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Comment deployment URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deploymentUrl = `https://${context.sha.substring(0, 8)}.securescan-vn.pages.dev`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 **Preview deployment ready!**\n\n📱 **Preview URL:** ${deploymentUrl}\n\n✅ Build completed successfully`
+            });
+            
+  lighthouse:
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          urls: |
+            https://${{ github.sha }}.securescan-vn.pages.dev
+          configPath: './frontend/lighthouserc.json'
+          uploadArtifacts: true
+          temporaryPublicStorage: true

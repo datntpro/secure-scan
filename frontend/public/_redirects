@@ -1,0 +1,13 @@
+# Redirects for SecureScan.vn
+
+# Redirect www to non-www
+https://www.securescan.vn/* https://securescan.vn/:splat 301!
+
+# API redirects to backend
+/api/* https://api.securescan.vn/api/:splat 200
+
+# WebSocket proxy
+/ws/* https://api.securescan.vn/ws/:splat 200
+
+# SPA fallback - must be last
+/* /index.html 200

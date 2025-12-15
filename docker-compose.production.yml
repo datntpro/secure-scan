@@ -1,0 +1,328 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: securescan_postgres
+    environment:
+      POSTGRES_DB: securescan_prod
+      POSTGRES_USER: securescan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    container_name: securescan_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - securescan_network
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+
+  # ZAP Cluster - Multiple instances
+  zap-1:
+    image: owasp/zap2docker-stable:latest
+    container_name: securescan_zap_1
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=securescan-zap-key
+    ports:
+      - "8080:8080"
+    networks:
+      - securescan_network
+    volumes:
+      - zap_data_1:/zap/wrk
+    environment:
+      - JAVA_OPTS=-Xmx2g -XX:+UseG1GC
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: '2'
+        reservations:
+          memory: 2g
+          cpus: '1'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/?apikey=securescan-zap-key"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  zap-2:
+    image: owasp/zap2docker-stable:latest
+    container_name: securescan_zap_2
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=securescan-zap-key
+    ports:
+      - "8081:8080"
+    networks:
+      - securescan_network
+    volumes:
+      - zap_data_2:/zap/wrk
+    environment:
+      - JAVA_OPTS=-Xmx2g -XX:+UseG1GC
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: '2'
+        reservations:
+          memory: 2g
+          cpus: '1'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/?apikey=securescan-zap-key"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  zap-3:
+    image: owasp/zap2docker-stable:latest
+    container_name: securescan_zap_3
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=securescan-zap-key
+    ports:
+      - "8082:8080"
+    networks:
+      - securescan_network
+    volumes:
+      - zap_data_3:/zap/wrk
+    environment:
+      - JAVA_OPTS=-Xmx2g -XX:+UseG1GC
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: '2'
+        reservations:
+          memory: 2g
+          cpus: '1'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/?apikey=securescan-zap-key"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ZAP Load Balancer (HAProxy)
+  zap-lb:
+    image: haproxy:2.8-alpine
+    container_name: securescan_zap_lb
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - securescan_network
+    depends_on:
+      - zap-1
+      - zap-2
+      - zap-3
+    restart: unless-stopped
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securescan_backend
+    environment:
+      - DATABASE_URL=postgresql://securescan:${POSTGRES_PASSWORD}@postgres:5432/securescan_prod
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - ZAP_POOL_ENABLED=true
+      - ZAP_MIN_INSTANCES=3
+      - ZAP_MAX_INSTANCES=10
+      - ZAP_BASE_PORT=8080
+      - APP_ENV=production
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./reports:/app/reports
+    depends_on:
+      - postgres
+      - redis
+      - zap-lb
+    networks:
+      - securescan_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2'
+        reservations:
+          memory: 1g
+          cpus: '1'
+
+  # Celery Worker Pool
+  celery_worker_1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securescan_worker_1
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 --hostname=worker1@%h
+    environment:
+      - DATABASE_URL=postgresql://securescan:${POSTGRES_PASSWORD}@postgres:5432/securescan_prod
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - ZAP_POOL_ENABLED=true
+    volumes:
+      - ./reports:/app/reports
+    depends_on:
+      - postgres
+      - redis
+      - zap-lb
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  celery_worker_2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securescan_worker_2
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 --hostname=worker2@%h
+    environment:
+      - DATABASE_URL=postgresql://securescan:${POSTGRES_PASSWORD}@postgres:5432/securescan_prod
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - ZAP_POOL_ENABLED=true
+    volumes:
+      - ./reports:/app/reports
+    depends_on:
+      - postgres
+      - redis
+      - zap-lb
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Celery Beat Scheduler
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securescan_beat
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://securescan:${POSTGRES_PASSWORD}@postgres:5432/securescan_prod
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    volumes:
+      - ./reports:/app/reports
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Celery Flower (Monitoring)
+  celery_flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securescan_flower
+    command: celery -A app.workers.celery_app flower --port=5555
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: securescan_frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=https://api.securescan.vn
+      - NEXT_PUBLIC_WS_URL=wss://api.securescan.vn
+      - NODE_ENV=production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: securescan_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+      - ./docker/nginx/logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Monitoring - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: securescan_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+  # Monitoring - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: securescan_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - securescan_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  zap_data_1:
+  zap_data_2:
+  zap_data_3:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  securescan_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
